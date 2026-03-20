@@ -1,0 +1,27 @@
+# Driver names as reported by /sys/class/net/wlanX/device/driver
+# Run: basename "$(readlink /sys/class/net/wlan0/device/driver)"
+DRIVER_5G="your_5g_driver"
+DRIVER_24G="your_24g_driver"
+
+# Fixed channels for each band
+CHANNEL_5G=0
+CHANNEL_24G=0
+
+# Access point BSSIDs (one per band)
+AP_BSSID_5G="AA:BB:CC:DD:EE:01"
+AP_BSSID_24G="AA:BB:CC:DD:EE:02"
+
+# Spoofed MAC address applied before enabling monitor mode
+MAC_SPOOF="AA:BB:CC:DD:EE:FF"
+
+# Path to the file containing one target MAC per line
+BLACKLIST="$HOME/your_blacklist_file"
+
+# How often (in seconds) the watchdog checks for channel drift
+WATCHDOG_INTERVAL=60
+
+# Number of deauth frames sent per target
+DEAUTH_COUNT=5
+
+# Seconds to wait between targets
+DEAUTH_SLEEP=3

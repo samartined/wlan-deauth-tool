@@ -44,11 +44,23 @@ resolve_iface_by_driver() {
 
 setup_monitor() {
   local iface="$1" channel="$2" mac="$3"
+  local current_mac=""
+  local current_type=""
 
   echo "[*] Configuring $iface: monitor mode + channel $channel + MAC $mac"
   sudo ip link set "$iface" down
-  sudo macchanger -m "$mac" "$iface"
-  sudo iw dev "$iface" set type monitor
+  current_mac=$(cat "/sys/class/net/$iface/address" 2>/dev/null | tr '[:upper:]' '[:lower:]') || true
+  if [ "$current_mac" = "${mac,,}" ]; then
+    echo "[*] MAC already set to $mac on $iface, skipping macchanger"
+  else
+    sudo macchanger -m "$mac" "$iface"
+  fi
+  current_type=$(iw dev "$iface" info 2>/dev/null | awk '/type/ {print $2}') || true
+  if [ "$current_type" = "monitor" ]; then
+    echo "[*] $iface is already in monitor mode, skipping type change"
+  else
+    sudo iw dev "$iface" set type monitor
+  fi
   sudo ip link set "$iface" up
   sudo iw dev "$iface" set channel "$channel"
   echo "[+] $iface ready in monitor mode, channel $channel"

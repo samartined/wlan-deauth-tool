@@ -18,10 +18,16 @@ MAC_SPOOF="AA:BB:CC:DD:EE:FF"
 BLACKLIST="$HOME/your_blacklist_file"
 
 # How often (in seconds) the watchdog checks for channel drift
-WATCHDOG_INTERVAL=60
+WATCHDOG_INTERVAL=30
 
-# Number of deauth frames sent per target
-DEAUTH_COUNT=5
+# Deauth bursts per cycle per worker (lower = faster rotation)
+DEAUTH_COUNT=1
 
-# Seconds to wait between targets
-DEAUTH_SLEEP=3
+# Seconds between bursts within each worker
+DEAUTH_SLEEP=0.5
+
+# Max workers launched per batch before staggering
+MAX_PARALLEL=4
+
+# Seconds between batches at startup to avoid saturating the adapter
+STAGGER_DELAY=0.3
